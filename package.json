@@ -1,0 +1,57 @@
+{
+  "name": "better-auth-phone",
+  "version": "1.0.0",
+  "description": "Better Auth phone number plugin with international country code support, multi-channel OTP delivery (SMS/WhatsApp), and custom OTP generation hooks.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js",
+      "require": "./dist/client.cjs"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "prepare": "tsup"
+  },
+  "peerDependencies": {
+    "better-auth": ">=1.6.0",
+    "better-call": ">=1.0.0"
+  },
+  "devDependencies": {
+    "better-auth": "^1.6.2",
+    "@better-auth/core": "^1.6.2",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "better-call": "^1.1.7"
+  },
+  "keywords": [
+    "better-auth",
+    "phone-number",
+    "otp",
+    "authentication",
+    "sms",
+    "whatsapp",
+    "country-code",
+    "plugin"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/superkalam/better-auth-phone-plugin"
+  }
+}
