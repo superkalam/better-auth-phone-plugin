@@ -438,6 +438,11 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
                         description:
                           "Session token if session is created, null if disableSession is true",
                       },
+                      isNewUser: {
+                        type: "boolean",
+                        description:
+                          "True when the verification created a new account (signup), false when it verified an existing user",
+                      },
                       user: {
                         type: "object",
                         nullable: true,
@@ -549,6 +554,7 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
           status: true,
           token: session.session.token,
           user: parseUserOutput(ctx.context.options, user),
+          isNewUser: false,
         });
       }
 
@@ -561,6 +567,9 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
           { value: ctx.body.countryCode, field: "countryCode" },
         ],
       });
+
+      // [ADDED] Track whether this verification resulted in a new user being created
+      let isNewUser = false;
 
       if (!user) {
         if (opts?.signUpOnVerification) {
@@ -588,6 +597,8 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
           if (!user) {
             throw new APIError("INTERNAL_SERVER_ERROR", { message: BASE_ERROR_CODES.FAILED_TO_CREATE_USER.message });
           }
+          // [ADDED] Mark as new user signup
+          isNewUser = true;
         }
       } else {
         user = await ctx.context.internalAdapter.updateUser<UserWithPhoneNumber>(
@@ -621,6 +632,8 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
           status: true,
           token: session.token,
           user: parseUserOutput(ctx.context.options, user),
+          // [ADDED] Indicates whether this was a new signup vs an existing user verifying
+          isNewUser,
         });
       }
 
@@ -628,6 +641,8 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
         status: true,
         token: null,
         user: parseUserOutput(ctx.context.options, user),
+        // [ADDED] Indicates whether this was a new signup vs an existing user verifying
+        isNewUser,
       });
     },
   );

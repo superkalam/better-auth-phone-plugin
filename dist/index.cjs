@@ -4675,6 +4675,10 @@ var verifyPhoneNumber = (opts) => createAuthEndpoint(
                       nullable: true,
                       description: "Session token if session is created, null if disableSession is true"
                     },
+                    isNewUser: {
+                      type: "boolean",
+                      description: "True when the verification created a new account (signup), false when it verified an existing user"
+                    },
                     user: {
                       type: "object",
                       nullable: true,
@@ -4773,7 +4777,8 @@ var verifyPhoneNumber = (opts) => createAuthEndpoint(
       return ctx.json({
         status: true,
         token: session.session.token,
-        user: db.parseUserOutput(ctx.context.options, user2)
+        user: db.parseUserOutput(ctx.context.options, user2),
+        isNewUser: false
       });
     }
     let user = await ctx.context.adapter.findOne({
@@ -4784,6 +4789,7 @@ var verifyPhoneNumber = (opts) => createAuthEndpoint(
         { value: ctx.body.countryCode, field: "countryCode" }
       ]
     });
+    let isNewUser = false;
     if (!user) {
       if (opts?.signUpOnVerification) {
         const {
@@ -4808,6 +4814,7 @@ var verifyPhoneNumber = (opts) => createAuthEndpoint(
         if (!user) {
           throw new betterCall.APIError("INTERNAL_SERVER_ERROR", { message: BASE_ERROR_CODES.FAILED_TO_CREATE_USER.message });
         }
+        isNewUser = true;
       }
     } else {
       user = await ctx.context.internalAdapter.updateUser(
@@ -4837,13 +4844,17 @@ var verifyPhoneNumber = (opts) => createAuthEndpoint(
       return ctx.json({
         status: true,
         token: session.token,
-        user: db.parseUserOutput(ctx.context.options, user)
+        user: db.parseUserOutput(ctx.context.options, user),
+        // [ADDED] Indicates whether this was a new signup vs an existing user verifying
+        isNewUser
       });
     }
     return ctx.json({
       status: true,
       token: null,
-      user: db.parseUserOutput(ctx.context.options, user)
+      user: db.parseUserOutput(ctx.context.options, user),
+      // [ADDED] Indicates whether this was a new signup vs an existing user verifying
+      isNewUser
     });
   }
 );

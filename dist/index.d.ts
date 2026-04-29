@@ -373,6 +373,10 @@ declare const phoneNumber: (options?: PhoneNumberOptions | undefined) => {
                                                 nullable: boolean;
                                                 description: string;
                                             };
+                                            isNewUser: {
+                                                type: string;
+                                                description: string;
+                                            };
                                             user: {
                                                 type: string;
                                                 nullable: boolean;
@@ -442,10 +446,12 @@ declare const phoneNumber: (options?: PhoneNumberOptions | undefined) => {
                 name: string;
                 image?: string | null | undefined;
             } & UserWithPhoneNumber;
+            isNewUser: boolean;
         } | {
             status: boolean;
             token: null;
             user: UserWithPhoneNumber;
+            isNewUser: boolean;
         }>;
         requestPasswordResetPhoneNumber: better_call.StrictEndpoint<"/phone-number/request-password-reset", {
             method: "POST";
