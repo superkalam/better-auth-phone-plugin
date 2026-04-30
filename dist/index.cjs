@@ -4514,22 +4514,20 @@ var signInPhoneNumber = (opts) => createAuthEndpoint(
       ctx.context.logger.error("Invalid password");
       throw new betterCall.APIError("UNAUTHORIZED", { message: PHONE_NUMBER_ERROR_CODES.INVALID_PHONE_NUMBER_OR_PASSWORD.message });
     }
-    const session = await ctx.context.internalAdapter.createSession(
-      user.id,
-      ctx.body.rememberMe === false
-    );
+    const [session, additionalData] = await Promise.all([
+      ctx.context.internalAdapter.createSession(user.id, ctx.body.rememberMe === false),
+      opts.onLoginSuccess ? opts.onLoginSuccess({ user, isNewUser: false }, ctx) : Promise.resolve(void 0)
+    ]);
     if (!session) {
       ctx.context.logger.error("Failed to create session");
       throw new betterCall.APIError("UNAUTHORIZED", { message: BASE_ERROR_CODES.FAILED_TO_CREATE_SESSION.message });
     }
-    await cookies.setSessionCookie(
-      ctx,
-      { session, user },
-      ctx.body.rememberMe === false
-    );
+    await cookies.setSessionCookie(ctx, { session, user }, ctx.body.rememberMe === false);
     return ctx.json({
       token: session.token,
-      user: db.parseUserOutput(ctx.context.options, user)
+      user: db.parseUserOutput(ctx.context.options, user),
+      // [ADDED] additionalData: injected by the onLoginSuccess hook, undefined when hook not configured
+      ...additionalData !== void 0 ? { additionalData } : {}
     });
   }
 );
@@ -4836,7 +4834,10 @@ var verifyPhoneNumber = (opts) => createAuthEndpoint(
       ctx
     );
     if (!ctx.body.disableSession) {
-      const session = await ctx.context.internalAdapter.createSession(user.id);
+      const [session, additionalData] = await Promise.all([
+        ctx.context.internalAdapter.createSession(user.id),
+        opts.onLoginSuccess ? opts.onLoginSuccess({ user, isNewUser }, ctx) : Promise.resolve(void 0)
+      ]);
       if (!session) {
         throw new betterCall.APIError("INTERNAL_SERVER_ERROR", { message: BASE_ERROR_CODES.FAILED_TO_CREATE_SESSION.message });
       }
@@ -4845,15 +4846,15 @@ var verifyPhoneNumber = (opts) => createAuthEndpoint(
         status: true,
         token: session.token,
         user: db.parseUserOutput(ctx.context.options, user),
-        // [ADDED] Indicates whether this was a new signup vs an existing user verifying
-        isNewUser
+        isNewUser,
+        // [ADDED] additionalData: injected by the onLoginSuccess hook, undefined when hook not configured
+        ...additionalData !== void 0 ? { additionalData } : {}
       });
     }
     return ctx.json({
       status: true,
       token: null,
       user: db.parseUserOutput(ctx.context.options, user),
-      // [ADDED] Indicates whether this was a new signup vs an existing user verifying
       isNewUser
     });
   }

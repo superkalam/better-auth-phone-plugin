@@ -205,4 +205,32 @@ export interface PhoneNumberOptions {
    * @default 3
    */
   allowedAttempts?: number | undefined;
+
+  /**
+   * Called after the user is found or created, **before the session is created**.
+   *
+   * Executes in parallel with `createSession` — both run at the same time so there
+   * is no added latency compared to running sequentially. Because it fires before
+   * the session exists, do NOT read `ctx` for a session token here; use `user.id`
+   * to query any additional data you need.
+   *
+   * The returned object is attached to the login response under the `additionalData` key,
+   * allowing the client to receive any extra data in the same round-trip as the login itself.
+   *
+   * Only fires on successful logins (`verifyPhoneNumber`, `signInPhoneNumber`).
+   * Does not fire on OTP send, password reset, or `disableSession: true` flows.
+   *
+   * @example
+   * ```ts
+   * onLoginSuccess: async ({ user, isNewUser }) => {
+   *   const profile = await db.profile.findUnique({ where: { userId: user.id } });
+   *   return { profile };
+   * }
+   * // Login response: { token, user, isNewUser, additionalData: { profile: { ... } } }
+   * ```
+   */
+  onLoginSuccess?: (
+    data: { user: UserWithPhoneNumber; isNewUser: boolean },
+    ctx: GenericEndpointContext,
+  ) => Awaitable<Record<string, unknown>>;
 }

@@ -185,8 +185,55 @@ CREATE UNIQUE INDEX "user_phone_country_unique" ON "user" ("phoneNumber", "count
 | `sendPasswordResetOTP` | `(data, ctx?) => Promise<void>` | — | Deliver password-reset OTP. |
 | `phoneNumberValidator` | `(phone, countryCode) => Promise<boolean>` | accepts any | Validate phone number format. |
 | `callbackOnVerification` | `(data, ctx?) => Promise<void>` | — | Called after successful verification. |
+| `onLoginSuccess` | `(data, ctx) => Promise<Record<string, unknown>>` | — | Inject additional data into the login response. See below. |
 | `signUpOnVerification` | `{ getTempEmail, getTempName? }` | — | Auto-create user on first verification. |
 | `schema` | `InferOptionSchema<typeof schema>` | — | Remap DB column names. |
+
+---
+
+## Injecting additional data into the login response (`onLoginSuccess`)
+
+Use `onLoginSuccess` to fetch additional data on the server and return it in the same
+login response — eliminating a client round-trip.
+
+**Timing:** the hook is called **before the session is created**, running in parallel
+with `createSession`. This means:
+- No extra latency — it overlaps with the session write.
+- Do **not** read a session token from `ctx` inside this hook; use `user.id` instead.
+- Only fires on successful logins (`/phone-number/verify`, `/sign-in/phone-number`).
+- Does **not** fire on OTP send, password reset, or when `disableSession: true`.
+
+The returned object is attached to the response under the `additionalData` key.
+
+```ts
+phoneNumber({
+  sendOTP: async ({ phoneNumber, countryCode, code }) => { /* ... */ },
+
+  onLoginSuccess: async ({ user, isNewUser }) => {
+    const profile = await db.profile.findUnique({ where: { userId: user.id } });
+    return { profile };
+  },
+})
+```
+
+**Login response shape:**
+```json
+{
+  "status": true,
+  "token": "...",
+  "user": { "id": "...", "phoneNumber": "...", "..." },
+  "isNewUser": false,
+  "additionalData": {
+    "profile": { "..." }
+  }
+}
+```
+
+**Client access:**
+```ts
+const result = await authClient.phoneNumber.verify({ phoneNumber, countryCode, code });
+const profile = result.data?.additionalData?.profile;
+```
 
 ---
 

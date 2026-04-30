@@ -222,24 +222,21 @@ export const signInPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
         ctx.context.logger.error("Invalid password");
         throw new APIError("UNAUTHORIZED", { message: PHONE_NUMBER_ERROR_CODES.INVALID_PHONE_NUMBER_OR_PASSWORD.message });
       }
-      const session = await ctx.context.internalAdapter.createSession(
-        user.id,
-        ctx.body.rememberMe === false,
-      );
+      // [ADDED] Run session creation and onLoginSuccess hook in parallel to avoid serial round-trips
+      const [session, additionalData] = await Promise.all([
+        ctx.context.internalAdapter.createSession(user.id, ctx.body.rememberMe === false),
+        opts.onLoginSuccess ? opts.onLoginSuccess({ user, isNewUser: false }, ctx) : Promise.resolve(undefined),
+      ]);
       if (!session) {
         ctx.context.logger.error("Failed to create session");
         throw new APIError("UNAUTHORIZED", { message: BASE_ERROR_CODES.FAILED_TO_CREATE_SESSION.message });
       }
-      await setSessionCookie(
-        ctx,
-        { session, user },
-        ctx.body.rememberMe === false,
-      );
-      // [CHANGED] parseUserOutput used (same as upstream v1.6.2) — countryCode
-      // returned because it is declared in the schema as returned: true
+      await setSessionCookie(ctx, { session, user }, ctx.body.rememberMe === false);
       return ctx.json({
         token: session.token,
         user: parseUserOutput(ctx.context.options, user),
+        // [ADDED] additionalData: injected by the onLoginSuccess hook, undefined when hook not configured
+        ...(additionalData !== undefined ? { additionalData } : {}),
       });
     },
   );
@@ -623,7 +620,11 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
       );
 
       if (!ctx.body.disableSession) {
-        const session = await ctx.context.internalAdapter.createSession(user.id);
+        // [ADDED] Run session creation and onLoginSuccess hook in parallel to avoid serial round-trips
+        const [session, additionalData] = await Promise.all([
+          ctx.context.internalAdapter.createSession(user.id),
+          opts.onLoginSuccess ? opts.onLoginSuccess({ user, isNewUser }, ctx) : Promise.resolve(undefined),
+        ]);
         if (!session) {
           throw new APIError("INTERNAL_SERVER_ERROR", { message: BASE_ERROR_CODES.FAILED_TO_CREATE_SESSION.message });
         }
@@ -632,8 +633,9 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
           status: true,
           token: session.token,
           user: parseUserOutput(ctx.context.options, user),
-          // [ADDED] Indicates whether this was a new signup vs an existing user verifying
           isNewUser,
+          // [ADDED] additionalData: injected by the onLoginSuccess hook, undefined when hook not configured
+          ...(additionalData !== undefined ? { additionalData } : {}),
         });
       }
 
@@ -641,7 +643,6 @@ export const verifyPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
         status: true,
         token: null,
         user: parseUserOutput(ctx.context.options, user),
-        // [ADDED] Indicates whether this was a new signup vs an existing user verifying
         isNewUser,
       });
     },

@@ -1,6 +1,6 @@
 {
   "name": "better-auth-phone",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Better Auth phone number plugin with international country code support, multi-channel OTP delivery (SMS/WhatsApp), and custom OTP generation hooks.",
   "type": "module",
   "exports": {
