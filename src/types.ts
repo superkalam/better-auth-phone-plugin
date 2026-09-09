@@ -12,7 +12,21 @@ import type { schema } from "./schema";
  *   [MODIFIED] PhoneNumberOptions.phoneNumberValidator — added countryCode parameter
  *   [MODIFIED] PhoneNumberOptions.callbackOnVerification — added countryCode and optional channel
  *   [ADDED]    PhoneNumberOptions.generateOTP — custom OTP generation hook
+ *   [ADDED]    PhoneNumberOptions.resendStrategy — "reuse" | "rotate" (default rotate)
+ *   [ADDED]    PhoneNumberOptions.defaultChannels — used when request omits channel
+ *   [ADDED]    Request `channel` may be string | string[]; plugin fans out sendOTP per channel
+ *              and persists one verification row per channel
  */
+
+/** One or more delivery channels. Plugin normalizes and calls sendOTP once per entry. */
+export type PhoneOtpChannel = string | string[];
+
+/** Per-channel delivery outcome from send-otp / password-reset OTP fan-out. */
+export type PhoneOtpChannelSendResult = {
+  channel?: string;
+  ok: boolean;
+  error?: string;
+};
 
 // ── User type ─────────────────────────────────────────────────────────────────
 
@@ -65,7 +79,7 @@ export interface PhoneNumberOptions {
         data: {
           phoneNumber: string;
           countryCode: string;
-          channel?: string;
+          channel?: PhoneOtpChannel;
           otpLength: number;
         },
         ctx?: GenericEndpointContext,
@@ -76,6 +90,8 @@ export interface PhoneNumberOptions {
    * Send OTP code to the user. **Required.**
    *
    * [MODIFIED vs upstream] `data` now includes `countryCode` and optional `channel`.
+   * When the client sends multiple channels, the plugin invokes this once per channel
+   * with a single `channel` string each time.
    *
    * @param data.phoneNumber  - Local phone number (without country code)
    * @param data.countryCode  - Dial code, e.g. "+1"
@@ -108,7 +124,7 @@ export interface PhoneNumberOptions {
           phoneNumber: string;
           countryCode: string;
           code: string;
-          channel?: string;
+          channel?: PhoneOtpChannel;
         },
         ctx?: GenericEndpointContext,
       ) => Awaitable<boolean>)
@@ -118,6 +134,7 @@ export interface PhoneNumberOptions {
    * Callback to send OTP when a user requests a password reset.
    *
    * [MODIFIED vs upstream] `data` now includes `countryCode` and optional `channel`.
+   * Multi-channel requests invoke this once per channel (same as `sendOTP`).
    */
   sendPasswordResetOTP?:
     | ((
@@ -130,6 +147,26 @@ export interface PhoneNumberOptions {
         ctx?: GenericEndpointContext,
       ) => Awaitable<void>)
     | undefined;
+
+  /**
+   * How to handle a resend while a previous OTP is still valid.
+   *
+   * - `"rotate"` (default) — always mint a new OTP (previous codes stop matching verify,
+   *   which only reads the latest verification row).
+   * - `"reuse"` — if an unused, unexpired OTP exists for the phone identifier, resend
+   *   that same code and refresh `expiresAt` instead of creating a new row.
+   *
+   * @default "rotate"
+   */
+  resendStrategy?: "rotate" | "reuse" | undefined;
+
+  /**
+   * Channels used when the request omits `channel`.
+   * Each entry gets its own verification row and one `sendOTP` invocation.
+   *
+   * @example `defaultChannels: ["SMS", "WhatsApp"]`
+   */
+  defaultChannels?: string[] | undefined;
 
   /**
    * Expiry time of the OTP code in seconds.
@@ -166,7 +203,7 @@ export interface PhoneNumberOptions {
         data: {
           phoneNumber: string;
           countryCode: string;
-          channel?: string;
+          channel?: PhoneOtpChannel;
           user: UserWithPhoneNumber;
         },
         ctx?: GenericEndpointContext,

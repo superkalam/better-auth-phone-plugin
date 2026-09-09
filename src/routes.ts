@@ -15,6 +15,7 @@
  */
 
 import { createAuthEndpoint } from "@better-auth/core/api";
+import type { GenericEndpointContext } from "@better-auth/core";
 import { APIError } from "better-call";
 import { BASE_ERROR_CODES } from "@better-auth/core/error";
 import * as z from "zod";
@@ -24,7 +25,12 @@ import { generateRandomString } from "better-auth/crypto";
 import { parseUserInput, parseUserOutput } from "better-auth/db";
 import type { Account } from "better-auth";
 import { PHONE_NUMBER_ERROR_CODES } from "./error-codes";
-import type { PhoneNumberOptions, UserWithPhoneNumber } from "./types";
+import type {
+  PhoneNumberOptions,
+  PhoneOtpChannel,
+  PhoneOtpChannelSendResult,
+  UserWithPhoneNumber,
+} from "./types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -36,6 +42,32 @@ export type RequiredPhoneNumberOptions = PhoneNumberOptions & {
   code: string;
   createdAt: string;
 };
+
+/** Accept a single channel string or an array of channels on request bodies. */
+const channelBodySchema = z
+  .union([z.string(), z.array(z.string())])
+  .optional()
+  .meta({
+    description:
+      'OTP delivery channel(s). Eg: "SMS" or ["SMS", "WHATSAPP"]',
+  });
+
+function normalizeChannels(channel?: PhoneOtpChannel): string[] {
+  if (channel == null) return [];
+  return Array.isArray(channel) ? channel.filter(Boolean) : channel ? [channel] : [];
+}
+
+/** Request channel if set, else plugin `defaultChannels`. */
+function resolveDeliveryChannels(
+  opts: RequiredPhoneNumberOptions,
+  channel?: PhoneOtpChannel,
+): (string | undefined)[] {
+  const fromRequest = normalizeChannels(channel);
+  if (fromRequest.length) return fromRequest;
+  const defaults = opts.defaultChannels?.filter(Boolean) ?? [];
+  if (defaults.length) return defaults;
+  return [undefined];
+}
 
 /**
  * [CHANGED] Renamed from `generateOTP` to `defaultGenerateOTP`.
@@ -54,9 +86,9 @@ async function resolveOTP(
   data: {
     phoneNumber: string;
     countryCode: string;
-    channel?: string;
+    channel?: PhoneOtpChannel;
   },
-  ctx: Parameters<typeof createAuthEndpoint>[2] extends infer C ? C : never,
+  ctx: GenericEndpointContext,
 ): Promise<string> {
   if (opts.generateOTP) {
     return opts.generateOTP(
@@ -66,8 +98,7 @@ async function resolveOTP(
         channel: data.channel,
         otpLength: opts.otpLength,
       },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ctx as any,
+      ctx,
     );
   }
   return defaultGenerateOTP(opts.otpLength);
@@ -88,6 +119,161 @@ function resetIdentifier(countryCode: string, phoneNumber: string): string {
   return `${countryCode}-${phoneNumber}-request-password-reset`;
 }
 
+type ReusedOTP = { code: string; attempts: string };
+
+/**
+ * [ADDED] Reuse an unused, unexpired OTP for `identifier` when
+ * `resendStrategy === "reuse"`. Returns plaintext OTP + attempt count or null.
+ */
+async function tryReuseOTP(
+  ctx: GenericEndpointContext,
+  opts: RequiredPhoneNumberOptions,
+  identifier: string,
+): Promise<ReusedOTP | null> {
+  if (opts.resendStrategy !== "reuse") return null;
+  const existing =
+    await ctx.context.internalAdapter.findVerificationValue(identifier);
+  if (!existing || existing.expiresAt < new Date()) return null;
+  const [otpValue, attempts] = existing.value.split(":");
+  const allowedAttempts = opts.allowedAttempts || 3;
+  if (attempts && parseInt(attempts) >= allowedAttempts) return null;
+  if (!otpValue) return null;
+  return { code: otpValue, attempts: attempts || "0" };
+}
+
+async function persistOTPRows(
+  ctx: GenericEndpointContext,
+  data: {
+    identifier: string;
+    value: string;
+    expiresAt: Date;
+    channels: (string | undefined)[];
+  },
+): Promise<void> {
+  for (const ch of data.channels) {
+    await ctx.context.internalAdapter.createVerificationValue({
+      value: data.value,
+      identifier: data.identifier,
+      expiresAt: data.expiresAt,
+      ...(ch ? { channel: ch } : {}),
+    } as Parameters<
+      typeof ctx.context.internalAdapter.createVerificationValue
+    >[0]);
+  }
+}
+
+/**
+ * [ADDED] Resolve OTP (reuse or mint). One verification row per delivery channel.
+ * On reuse, rows are rewritten for the current channel list with a fresh expiry.
+ */
+async function issuePhoneOTP(
+  ctx: GenericEndpointContext,
+  opts: RequiredPhoneNumberOptions,
+  data: {
+    phoneNumber: string;
+    countryCode: string;
+    channel?: PhoneOtpChannel;
+    identifier: string;
+  },
+): Promise<string> {
+  const channels = resolveDeliveryChannels(opts, data.channel);
+  const expiresAt = getDate(opts.expiresIn, "sec");
+  const reused = await tryReuseOTP(ctx, opts, data.identifier);
+
+  if (reused) {
+    await ctx.context.internalAdapter.deleteVerificationByIdentifier(
+      data.identifier,
+    );
+    await persistOTPRows(ctx, {
+      identifier: data.identifier,
+      value: `${reused.code}:${reused.attempts}`,
+      expiresAt,
+      channels,
+    });
+    return reused.code;
+  }
+
+  const code = await resolveOTP(
+    opts,
+    {
+      phoneNumber: data.phoneNumber,
+      countryCode: data.countryCode,
+      channel: data.channel,
+    },
+    ctx,
+  );
+  await persistOTPRows(ctx, {
+    identifier: data.identifier,
+    value: `${code}:0`,
+    expiresAt,
+    channels,
+  });
+  return code;
+}
+
+type SendFn = (
+  data: {
+    phoneNumber: string;
+    countryCode: string;
+    code: string;
+    channel?: string;
+  },
+  ctx?: GenericEndpointContext,
+) => unknown;
+
+/**
+ * [ADDED] Fan-out sendOTP once per channel.
+ * Succeeds if any channel delivers; returns per-channel outcomes for the caller.
+ */
+async function dispatchChannelSends(
+  ctx: GenericEndpointContext,
+  sendFn: SendFn,
+  data: { phoneNumber: string; countryCode: string; code: string },
+  opts: RequiredPhoneNumberOptions,
+  channel?: PhoneOtpChannel,
+): Promise<PhoneOtpChannelSendResult[]> {
+  const targets = resolveDeliveryChannels(opts, channel);
+
+  const settled = await Promise.allSettled(
+    targets.map(async (ch) => {
+      await sendFn(
+        {
+          phoneNumber: data.phoneNumber,
+          countryCode: data.countryCode,
+          code: data.code,
+          channel: ch,
+        },
+        ctx,
+      );
+      return ch;
+    }),
+  );
+
+  const results: PhoneOtpChannelSendResult[] = settled.map((outcome, i) => {
+    const ch = targets[i];
+    if (outcome.status === "fulfilled") {
+      return { channel: ch, ok: true };
+    }
+    const reason = outcome.reason;
+    const error =
+      reason instanceof Error
+        ? reason.message
+        : typeof reason === "string"
+          ? reason
+          : "send failed";
+    ctx.context.logger.error("OTP channel send failed", { channel: ch, error });
+    return { channel: ch, ok: false, error };
+  });
+
+  if (!results.some((r) => r.ok)) {
+    throw new APIError("INTERNAL_SERVER_ERROR", {
+      message: PHONE_NUMBER_ERROR_CODES.UNEXPECTED_ERROR.message,
+    });
+  }
+
+  return results;
+}
+
 // ── Endpoint: signInPhoneNumber ───────────────────────────────────────────────
 
 // [CHANGED] Added `countryCode` (required) and `channel` (optional) to body schema
@@ -103,12 +289,8 @@ const signInPhoneNumberBodySchema = z.object({
     description: "Password to use for sign in.",
   }),
   // [ADDED] — only used when requireVerification is true and the user is unverified
-  channel: z
-    .string()
-    .optional()
-    .meta({
-      description: 'OTP delivery channel when re-sending. Eg: "SMS" or "WHATSAPP"',
-    }),
+  // [CHANGED] Accept string | string[] for multi-channel fan-out
+  channel: channelBodySchema,
   rememberMe: z
     .boolean()
     .meta({ description: "Remember the session. Eg: true" })
@@ -180,23 +362,21 @@ export const signInPhoneNumber = (opts: RequiredPhoneNumberOptions) =>
 
       if (opts.requireVerification) {
         if (!user.phoneNumberVerified) {
-          // [CHANGED] Use resolveOTP helper instead of plain generateOTP
-          const otp = await resolveOTP(opts, { phoneNumber, countryCode, channel }, ctx);
-          // [CHANGED] OTP identifier includes countryCode; channel stored in record
-          await ctx.context.internalAdapter.createVerificationValue({
-            value: otp,
+          // [CHANGED] Reuse/mint via issuePhoneOTP; fan-out sendOTP per channel
+          const otp = await issuePhoneOTP(ctx, opts, {
+            phoneNumber,
+            countryCode,
+            channel,
             identifier: otpIdentifier(countryCode, phoneNumber),
-            expiresAt: getDate(opts.expiresIn, "sec"),
-            // channel is stored via schema extension; cast needed because
-            // Better Auth's Verification type doesn't yet support extra fields
-            // (upstream TODO: generics for verification custom fields)
-            ...(channel ? { channel } : {}),
-          } as Parameters<typeof ctx.context.internalAdapter.createVerificationValue>[0]);
+          });
 
           if (opts.sendOTP) {
-            await ctx.context.runInBackgroundOrAwait(
-              // [CHANGED] Pass countryCode and channel to sendOTP callback
-              opts.sendOTP({ phoneNumber, countryCode, code: otp, channel }, ctx),
+            await dispatchChannelSends(
+              ctx,
+              opts.sendOTP,
+              { phoneNumber, countryCode, code: otp },
+              opts,
+              channel,
             );
           }
           throw new APIError("UNAUTHORIZED", { message: PHONE_NUMBER_ERROR_CODES.PHONE_NUMBER_NOT_VERIFIED.message });
@@ -252,13 +432,8 @@ const sendPhoneNumberOTPBodySchema = z.object({
   countryCode: z.string().meta({
     description: 'International dial code. Eg: "+1", "+91"',
   }),
-  // [ADDED]
-  channel: z
-    .string()
-    .optional()
-    .meta({
-      description: 'OTP delivery channel. Eg: "SMS" or "WHATSAPP"',
-    }),
+  // [ADDED] Accept string | string[] for multi-channel fan-out
+  channel: channelBodySchema,
 });
 
 /**
@@ -310,53 +485,26 @@ export const sendPhoneNumberOTP = (opts: RequiredPhoneNumberOptions) =>
         }
       }
 
-      // [CHANGED] Use resolveOTP helper
-      const code = await resolveOTP(
-        opts,
-        {
-          phoneNumber: ctx.body.phoneNumber,
-          countryCode: ctx.body.countryCode,
-          channel: ctx.body.channel,
-        },
-        ctx,
-      );
-
-      // [CHANGED] OTP identifier includes countryCode; channel stored in record
-      await ctx.context.internalAdapter.createVerificationValue({
-        value: `${code}:0`,
+      // [CHANGED] Reuse or mint OTP; one verification row + sendOTP per channel
+      const code = await issuePhoneOTP(ctx, opts, {
+        phoneNumber: ctx.body.phoneNumber,
+        countryCode: ctx.body.countryCode,
+        channel: ctx.body.channel,
         identifier: otpIdentifier(ctx.body.countryCode, ctx.body.phoneNumber),
-        expiresAt: getDate(opts.expiresIn, "sec"),
-        ...(ctx.body.channel ? { channel: ctx.body.channel } : {}),
-      } as Parameters<typeof ctx.context.internalAdapter.createVerificationValue>[0]);
+      });
 
-      // Upstream v1.6.2 uses a more explicit background-task check; kept as-is
-      const sendOTPResult = opts.sendOTP(
-        // [CHANGED] Pass countryCode and channel
+      const channels = await dispatchChannelSends(
+        ctx,
+        opts.sendOTP,
         {
           phoneNumber: ctx.body.phoneNumber,
           countryCode: ctx.body.countryCode,
           code,
-          channel: ctx.body.channel,
         },
-        ctx,
+        opts,
+        ctx.body.channel,
       );
-      if (
-        ctx.context.options.advanced?.backgroundTasks?.handler &&
-        sendOTPResult instanceof Promise
-      ) {
-        try {
-          ctx.context.runInBackground(
-            sendOTPResult.catch((e) => {
-              ctx.context.logger.error("Failed to run background task:", e);
-            }),
-          );
-        } catch (e) {
-          ctx.context.logger.error("Failed to run background task:", e);
-        }
-      } else {
-        await sendOTPResult;
-      }
-      return ctx.json({ message: "code sent" });
+      return ctx.json({ message: "code sent", channels });
     },
   );
 
@@ -377,13 +525,8 @@ const verifyPhoneNumberBodySchema = z
     code: z.string().meta({
       description: 'OTP code. Eg: "123456"',
     }),
-    // [ADDED]
-    channel: z
-      .string()
-      .optional()
-      .meta({
-        description: 'OTP delivery channel. Eg: "SMS" or "WHATSAPP"',
-      }),
+    // [ADDED] Accept string | string[] (metadata only; verify does not match on channel)
+    channel: channelBodySchema,
     disableSession: z
       .boolean()
       .meta({
@@ -657,13 +800,8 @@ const requestPasswordResetPhoneNumberBodySchema = z.object({
   countryCode: z.string().meta({
     description: 'International dial code. Eg: "+1", "+91"',
   }),
-  // [ADDED]
-  channel: z
-    .string()
-    .optional()
-    .meta({
-      description: 'OTP delivery channel. Eg: "SMS" or "WHATSAPP"',
-    }),
+  // [ADDED] Accept string | string[] for multi-channel fan-out
+  channel: channelBodySchema,
 });
 
 /**
@@ -713,24 +851,13 @@ export const requestPasswordResetPhoneNumber = (
         ],
       });
 
-      // [CHANGED] Use resolveOTP helper
-      const code = await resolveOTP(
-        opts,
-        {
-          phoneNumber: ctx.body.phoneNumber,
-          countryCode: ctx.body.countryCode,
-          channel: ctx.body.channel,
-        },
-        ctx,
-      );
-
-      // [CHANGED] OTP identifier includes countryCode; channel stored in record
-      await ctx.context.internalAdapter.createVerificationValue({
-        value: `${code}:0`,
+      // [CHANGED] Reuse or mint OTP; one verification row + send per channel
+      const code = await issuePhoneOTP(ctx, opts, {
+        phoneNumber: ctx.body.phoneNumber,
+        countryCode: ctx.body.countryCode,
+        channel: ctx.body.channel,
         identifier: resetIdentifier(ctx.body.countryCode, ctx.body.phoneNumber),
-        expiresAt: getDate(opts.expiresIn, "sec"),
-        ...(ctx.body.channel ? { channel: ctx.body.channel } : {}),
-      } as Parameters<typeof ctx.context.internalAdapter.createVerificationValue>[0]);
+      });
 
       // Avoid leaking whether the phone exists
       if (!user) {
@@ -738,18 +865,18 @@ export const requestPasswordResetPhoneNumber = (
       }
 
       if (opts.sendPasswordResetOTP) {
-        await ctx.context.runInBackgroundOrAwait(
-          // [CHANGED] Pass countryCode and channel to callback
-          opts.sendPasswordResetOTP(
-            {
-              phoneNumber: ctx.body.phoneNumber,
-              countryCode: ctx.body.countryCode,
-              code,
-              channel: ctx.body.channel,
-            },
-            ctx,
-          ),
+        const channels = await dispatchChannelSends(
+          ctx,
+          opts.sendPasswordResetOTP,
+          {
+            phoneNumber: ctx.body.phoneNumber,
+            countryCode: ctx.body.countryCode,
+            code,
+          },
+          opts,
+          ctx.body.channel,
         );
+        return ctx.json({ status: true, channels });
       }
       return ctx.json({ status: true });
     },

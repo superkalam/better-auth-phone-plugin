@@ -1,6 +1,6 @@
 import * as better_auth from 'better-auth';
 import { phoneNumber } from './index.js';
-export { PHONE_NUMBER_ERROR_CODES, PhoneNumberOptions, UserWithPhoneNumber } from './index.js';
+export { PHONE_NUMBER_ERROR_CODES, PhoneNumberOptions, PhoneOtpChannel, PhoneOtpChannelSendResult, UserWithPhoneNumber } from './index.js';
 import 'zod/v4/core';
 import 'zod';
 import 'better-call';

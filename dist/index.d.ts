@@ -86,7 +86,19 @@ declare const schema: {
  *   [MODIFIED] PhoneNumberOptions.phoneNumberValidator — added countryCode parameter
  *   [MODIFIED] PhoneNumberOptions.callbackOnVerification — added countryCode and optional channel
  *   [ADDED]    PhoneNumberOptions.generateOTP — custom OTP generation hook
+ *   [ADDED]    PhoneNumberOptions.resendStrategy — "reuse" | "rotate" (default rotate)
+ *   [ADDED]    PhoneNumberOptions.defaultChannels — used when request omits channel
+ *   [ADDED]    Request `channel` may be string | string[]; plugin fans out sendOTP per channel
+ *              and persists one verification row per channel
  */
+/** One or more delivery channels. Plugin normalizes and calls sendOTP once per entry. */
+type PhoneOtpChannel = string | string[];
+/** Per-channel delivery outcome from send-otp / password-reset OTP fan-out. */
+type PhoneOtpChannelSendResult = {
+    channel?: string;
+    ok: boolean;
+    error?: string;
+};
 interface UserWithPhoneNumber extends User {
     phoneNumber: string;
     countryCode: string;
@@ -129,13 +141,15 @@ interface PhoneNumberOptions {
     generateOTP?: ((data: {
         phoneNumber: string;
         countryCode: string;
-        channel?: string;
+        channel?: PhoneOtpChannel;
         otpLength: number;
     }, ctx?: GenericEndpointContext) => Awaitable<string>) | undefined;
     /**
      * Send OTP code to the user. **Required.**
      *
      * [MODIFIED vs upstream] `data` now includes `countryCode` and optional `channel`.
+     * When the client sends multiple channels, the plugin invokes this once per channel
+     * with a single `channel` string each time.
      *
      * @param data.phoneNumber  - Local phone number (without country code)
      * @param data.countryCode  - Dial code, e.g. "+1"
@@ -162,12 +176,13 @@ interface PhoneNumberOptions {
         phoneNumber: string;
         countryCode: string;
         code: string;
-        channel?: string;
+        channel?: PhoneOtpChannel;
     }, ctx?: GenericEndpointContext) => Awaitable<boolean>) | undefined;
     /**
      * Callback to send OTP when a user requests a password reset.
      *
      * [MODIFIED vs upstream] `data` now includes `countryCode` and optional `channel`.
+     * Multi-channel requests invoke this once per channel (same as `sendOTP`).
      */
     sendPasswordResetOTP?: ((data: {
         phoneNumber: string;
@@ -175,6 +190,24 @@ interface PhoneNumberOptions {
         code: string;
         channel?: string;
     }, ctx?: GenericEndpointContext) => Awaitable<void>) | undefined;
+    /**
+     * How to handle a resend while a previous OTP is still valid.
+     *
+     * - `"rotate"` (default) — always mint a new OTP (previous codes stop matching verify,
+     *   which only reads the latest verification row).
+     * - `"reuse"` — if an unused, unexpired OTP exists for the phone identifier, resend
+     *   that same code and refresh `expiresAt` instead of creating a new row.
+     *
+     * @default "rotate"
+     */
+    resendStrategy?: "rotate" | "reuse" | undefined;
+    /**
+     * Channels used when the request omits `channel`.
+     * Each entry gets its own verification row and one `sendOTP` invocation.
+     *
+     * @example `defaultChannels: ["SMS", "WhatsApp"]`
+     */
+    defaultChannels?: string[] | undefined;
     /**
      * Expiry time of the OTP code in seconds.
      * @default 300
@@ -203,7 +236,7 @@ interface PhoneNumberOptions {
     callbackOnVerification?: ((data: {
         phoneNumber: string;
         countryCode: string;
-        channel?: string;
+        channel?: PhoneOtpChannel;
         user: UserWithPhoneNumber;
     }, ctx?: GenericEndpointContext) => Awaitable<void>) | undefined;
     /**
@@ -299,7 +332,7 @@ declare const phoneNumber: (options?: PhoneNumberOptions | undefined) => {
                 phoneNumber: zod.ZodString;
                 countryCode: zod.ZodString;
                 password: zod.ZodString;
-                channel: zod.ZodOptional<zod.ZodString>;
+                channel: zod.ZodOptional<zod.ZodUnion<readonly [zod.ZodString, zod.ZodArray<zod.ZodString>]>>;
                 rememberMe: zod.ZodOptional<zod.ZodBoolean>;
             }, zod_v4_core.$strip>;
             metadata: {
@@ -341,7 +374,7 @@ declare const phoneNumber: (options?: PhoneNumberOptions | undefined) => {
             body: zod.ZodObject<{
                 phoneNumber: zod.ZodString;
                 countryCode: zod.ZodString;
-                channel: zod.ZodOptional<zod.ZodString>;
+                channel: zod.ZodOptional<zod.ZodUnion<readonly [zod.ZodString, zod.ZodArray<zod.ZodString>]>>;
             }, zod_v4_core.$strip>;
             metadata: {
                 openapi: {
@@ -368,6 +401,7 @@ declare const phoneNumber: (options?: PhoneNumberOptions | undefined) => {
             };
         }, {
             message: string;
+            channels: PhoneOtpChannelSendResult[];
         }>;
         verifyPhoneNumber: better_call.StrictEndpoint<"/phone-number/verify", {
             method: "POST";
@@ -375,7 +409,7 @@ declare const phoneNumber: (options?: PhoneNumberOptions | undefined) => {
                 phoneNumber: zod.ZodString;
                 countryCode: zod.ZodString;
                 code: zod.ZodString;
-                channel: zod.ZodOptional<zod.ZodString>;
+                channel: zod.ZodOptional<zod.ZodUnion<readonly [zod.ZodString, zod.ZodArray<zod.ZodString>]>>;
                 disableSession: zod.ZodOptional<zod.ZodBoolean>;
                 updatePhoneNumber: zod.ZodOptional<zod.ZodBoolean>;
             }, zod_v4_core.$strip>, zod.ZodRecord<zod.ZodString, zod.ZodAny>>;
@@ -486,7 +520,7 @@ declare const phoneNumber: (options?: PhoneNumberOptions | undefined) => {
             body: zod.ZodObject<{
                 phoneNumber: zod.ZodString;
                 countryCode: zod.ZodString;
-                channel: zod.ZodOptional<zod.ZodString>;
+                channel: zod.ZodOptional<zod.ZodUnion<readonly [zod.ZodString, zod.ZodArray<zod.ZodString>]>>;
             }, zod_v4_core.$strip>;
             metadata: {
                 openapi: {
@@ -610,4 +644,4 @@ declare const phoneNumber: (options?: PhoneNumberOptions | undefined) => {
     };
 };
 
-export { PHONE_NUMBER_ERROR_CODES, type PhoneNumberOptions, type UserWithPhoneNumber, phoneNumber };
+export { PHONE_NUMBER_ERROR_CODES, type PhoneNumberOptions, type PhoneOtpChannel, type PhoneOtpChannelSendResult, type UserWithPhoneNumber, phoneNumber };

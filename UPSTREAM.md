@@ -79,6 +79,8 @@ https://github.com/better-auth/better-auth/tree/v1.6.2/packages/better-auth/src/
 | `phoneNumberValidator` | `[CHANGED]` | Receives `countryCode: string` as second argument |
 | `callbackOnVerification` | `[CHANGED]` | `data` gains `countryCode: string` and `channel?: string` |
 | `generateOTP` | `[ADDED]` | Custom OTP generation hook — replaces the built-in `generateRandomString` when provided. Receives `{ phoneNumber, countryCode, channel, otpLength }`. Useful for external OTP services, test/demo static codes, or environment-based strategies. |
+| `resendStrategy` | `[ADDED]` | `"rotate"` (default) or `"reuse"`. Reuse resends an unused unexpired OTP for the same identifier instead of minting a new one. |
+| Request `channel` | `[CHANGED]` | `string \| string[]` on send/sign-in/reset/verify bodies. Plugin fans out `sendOTP` / `sendPasswordResetOTP` once per channel. |
 | All other options | `[UNCHANGED]` | `otpLength`, `expiresIn`, `allowedAttempts`, `requireVerification`, `signUpOnVerification`, `schema` |
 
 ---

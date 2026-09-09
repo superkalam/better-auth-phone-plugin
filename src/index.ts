@@ -36,9 +36,9 @@ import {
   verifyPhoneNumber,
 } from "./routes";
 import { schema } from "./schema";
-import type { PhoneNumberOptions, UserWithPhoneNumber } from "./types";
+import type { PhoneNumberOptions, PhoneOtpChannel, PhoneOtpChannelSendResult, UserWithPhoneNumber } from "./types";
 
-export type { PhoneNumberOptions, UserWithPhoneNumber };
+export type { PhoneNumberOptions, PhoneOtpChannel, PhoneOtpChannelSendResult, UserWithPhoneNumber };
 export { PHONE_NUMBER_ERROR_CODES };
 
 /**
@@ -64,9 +64,10 @@ export { PHONE_NUMBER_ERROR_CODES };
  */
 export const phoneNumber = (options?: PhoneNumberOptions | undefined) => {
   const opts = {
+    ...options,
     expiresIn: options?.expiresIn || 300,
     otpLength: options?.otpLength || 6,
-    ...options,
+    resendStrategy: options?.resendStrategy || "rotate",
     phoneNumber: "phoneNumber",
     phoneNumberVerified: "phoneNumberVerified",
     code: "code",
